@@ -2,60 +2,60 @@
 
 ## Responsibility
 
-Runs real-time qualitative research using Claude + live web search to classify trade horizon, qualify or disqualify predictions, and produce a structured rationale for each signal.
+Runs real-time qualitative research using a two-stage token-optimised pipeline to classify trade horizon, qualify or disqualify predictions, and produce a structured rationale. Full Sonnet+web_search calls only run for predictions that pass the initial cheap filter.
 
-## How it works
+## Two-stage pipeline
 
-- Lazily creates Anthropic client via `getClient()`.
-- Uses the `web_search_20250305` built-in tool so Claude actually fetches live internet data before forming its analysis — not training-data-only reasoning.
-- System prompt instructs Claude to:
-  1. Classify `tradeHorizon` as `short_term`, `mid_term`, or `long_term`.
-  2. Auto-disqualify short-term/HFT-style trades (crypto price direction bets, < 48h resolution, speculative noise).
-  3. Search for breaking news, expert forecasts, historical base rates, and upcoming catalysts.
-  4. Return qualifying/disqualifying factors and a full rationale.
-  5. Provide a confidence score and recommendation.
+### Stage 1 — Haiku batch classifier (one call for all predictions)
+
+A single `claude-haiku-4-5-20251001` call receives all predictions at once and classifies each as `ultra_short` or `ok`. This costs roughly 150 tokens total regardless of batch size.
+
+- Input per prediction: question + end date (~15 tokens each)
+- Output: JSON array of `{"i": index, "t": "ultra_short"|"ok"}`
+- `ultra_short` predictions are immediately resolved with `recommendation: "strong_avoid"` — no Sonnet call needed
+- If Haiku fails, falls back to Sonnet for all (fail-open)
+
+### Stage 2 — Sonnet + web_search (survivors only)
+
+`claude-sonnet-4-20250514` with `web_search_20250305` runs only for predictions not discarded by Stage 1.
+
+**Token optimisations applied:**
+
+| Optimisation | Saving |
+|---|---|
+| System prompt caching (`cache_control: ephemeral`) | Cache reads cost 10% after first call in a 5-min window |
+| Trimmed user prompt | Removed description, avg entry price, hedge ratio, volume, liquidity — none help web search |
+| `max_tokens: 1200` (down from 3000) | Response is ~600-800 tokens; 2200 tokens of unused capacity eliminated |
+| Sources capped at 3 | Unbounded sources inflated output tokens |
+| Qualifying/disqualifying factors capped at 2 each | Reduces output token count |
+
+**Prompt caching detail:** The system prompt is passed as an array of content blocks with `cache_control: { type: "ephemeral" }`. After the first Sonnet call in a scan cycle, subsequent calls within 5 minutes read from cache at 10% of normal input token cost.
 
 ## Trade horizon classification
 
-| Horizon | Definition | Policy |
+| Horizon | Definition | Who classifies |
 |---|---|---|
-| `ultra_short` | Crypto/asset price direction bets ("will BTC be up today?"), intraday price levels, HFT-style speculation with no fundamental basis | Auto-disqualify |
-| `short_term` | Resolves in < 48h but event-driven (sports, news decisions, political votes, economic releases) | Scored normally |
-| `mid_term` | 2 days – 3 months, event/data-driven | Scored normally |
-| `long_term` | > 3 months, structural/political/economic | Scored normally |
+| `ultra_short` | Crypto/asset price direction bets, intraday speculation, HFT noise | Haiku (Stage 1) |
+| `short_term` | < 48h but event-driven (sports, news, political votes) | Sonnet (Stage 2) |
+| `mid_term` | 2 days – 3 months, event/data-driven | Sonnet (Stage 2) |
+| `long_term` | > 3 months, structural/political/economic | Sonnet (Stage 2) |
 
-## JSON output schema
+## Token usage estimate (5 predictions, 2 ultra_short)
 
-```json
-{
-  "tradeHorizon": "ultra_short|short_term|mid_term|long_term",
-  "confidenceScore": 0-100,
-  "recommendation": "strong_buy|buy|hold|avoid|strong_avoid",
-  "rationale": "3-5 sentence research summary",
-  "qualifyingFactors": ["..."],
-  "disqualifyingFactors": ["..."],
-  "sources": [{ "title", "url", "summary", "sentiment", "relevanceScore" }]
-}
-```
-
-## Response parsing
-
-Claude may produce multiple text blocks interspersed with `web_search_tool_result` blocks. The parser collects **all** `text`-type blocks and joins them before extracting JSON via regex, ensuring search result context does not break extraction.
-
-## Batch behavior
-
-- `researchBatch(predictions)` processes predictions in chunks of 3 to respect API rate limits.
-- Uses `Promise.allSettled` for partial success tolerance.
-- Returns `Map<predictionId, AgentResearch>`.
+| Before | After |
+|---|---|
+| 5 × Sonnet calls (~1400 tokens each) = ~7000 tokens | 1 Haiku call (~150) + 3 × Sonnet (~800 each) = ~2550 tokens |
+| ~7000 tokens | ~2550 tokens (~64% reduction) |
 
 ## Failure behavior
 
-Parsing or API errors return a conservative fallback:
-- `tradeHorizon: "mid_term"`
-- `confidenceScore: 30`
-- `recommendation: "hold"`
-- Single disqualifying factor noting research failure.
+- **Haiku failure**: falls back to running Sonnet for all predictions (fail-open)
+- **Sonnet failure**: returns conservative fallback (`hold`, confidence 30, `mid_term`)
+
+## Batch concurrency
+
+Stage 2 runs Sonnet calls in chunks of 3 (`Promise.allSettled`) to respect API rate limits while maximising throughput.
 
 ## Why it matters
 
-This module provides the real-world information layer that confirms or vetoes trader-consensus signals, with live web search ensuring analysis reflects current events rather than stale training data.
+Using Haiku as a cheap pre-filter means the most expensive model (Sonnet+web_search) only runs on trades that have a realistic chance of being qualified, keeping costs proportional to actual signal value.
