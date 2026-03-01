@@ -2,7 +2,22 @@
 
 ## Responsibility
 
-Discovers the top traders for the current week and ranks them by capital efficiency and consistency, not raw PnL alone.
+Discovers the top traders for the current week, ranks them by capital efficiency and consistency, and keeps their data fresh — without rebuilding the expensive leaderboard selection every scan cycle.
+
+## Two-tier refresh model
+
+`discoverTopTraders()` is called every scan cycle but behaves differently based on how old the current trader list is:
+
+| Condition | Action | API calls |
+|---|---|---|
+| First run or list > 30 min old | Full rebuild (`rebuildTraderList`) | ~82 calls (leaderboard + hydration) |
+| List < 30 min old | Data-only refresh (`refreshTraderData`) | ~40 calls (positions + activity only) |
+
+The weekly leaderboard changes over hours, not minutes. Rebuilding the selection every 60 seconds wasted ~80 API calls per minute for no meaningful change in who is being tracked. The 30-minute TTL is controlled by `TRADER_LIST_TTL_MS`.
+
+## Full rebuild (`rebuildTraderList`)
+
+Runs on first cycle and every 30 minutes:
 
 ## Selection pipeline
 
@@ -42,9 +57,14 @@ Final list is sorted by score descending and sliced to `TOP_TRADERS_COUNT` (defa
 
 Each selected trader is logged with: username, weekly PnL, weekly volume, ROI %, and open position win rate. Useful for verifying selection quality at a glance.
 
+## Lightweight per-cycle refresh (`refreshTraderData`)
+
+Runs on cycles where the trader list is still fresh (< 30 min old). Only re-fetches positions and recent activity for the already-selected traders — skips the leaderboard fetch, volume filter, activity filter, and re-scoring entirely. This keeps the 24h recency filter in the tracker working with up-to-date signals at minimal API cost.
+
 ## State
 
-- Maintains an in-memory `trackedTraders` map keyed by wallet address.
+- `trackedTraders` — in-memory map keyed by wallet address, updated each cycle.
+- `traderListBuiltAt` — timestamp of last full rebuild, drives the 30-min TTL check.
 - Exposes read access through `getTrackedTraders()` and `getTrader(address)`.
 
 ## Why it matters

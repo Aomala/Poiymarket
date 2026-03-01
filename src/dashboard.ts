@@ -83,15 +83,16 @@ export function renderDashboard(stats: DashboardStats): void {
     `  Avg Return/Trade:  ${stats.avgReturnPerTrade >= 0 ? "+" : ""}${stats.avgReturnPerTrade.toFixed(2)}%`
   );
 
-  // --- Current Batch ---
-  if (stats.currentBatch.length > 0) {
-    console.log("\n  CURRENT PREDICTIONS");
+  // --- Current Batch (qualified only) ---
+  const qualified = stats.currentBatch.filter((p) => p.status === "qualified");
+  if (qualified.length > 0) {
+    console.log(`\n  QUALIFIED PREDICTIONS (${qualified.length})`);
     console.log(DIVIDER);
-    for (const pred of stats.currentBatch) {
+    for (const pred of qualified) {
       renderPrediction(pred);
     }
   } else {
-    console.log("\n  No active predictions — waiting for signals...");
+    console.log("\n  No qualified predictions — waiting for signals...");
   }
 
   console.log(`\n${DIVIDER}\n`);
